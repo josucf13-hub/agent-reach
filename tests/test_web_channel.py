@@ -46,6 +46,37 @@ def test_exa_never_loops_after_two_truncated_reads():
     assert request.call_count == 2
 
 
+def test_exa_is_keyless_with_small_reads_by_default():
+    from agent_reach.channels.web import _exa_call
+    body = json.dumps({"result": {"content": [{"type": "text", "text": "Content"}]}}).encode()
+    with patch("agent_reach.channels.web._exa_api_key", return_value=""), \
+         patch("agent_reach.channels.web.http_request", return_value=body) as request:
+        assert _exa_call("web_fetch_exa", {"urls": ["https://example.com"]}, 5) == "Content"
+        WebChannel()._exa_read(target="https://example.com", timeout=5)
+    assert "Authorization" not in request.call_args_list[0].kwargs["headers"]
+    sent = json.loads(request.call_args_list[1].kwargs["data"])
+    assert sent["params"]["arguments"]["maxCharacters"] == 20000
+
+
+def test_exa_key_is_sent_as_bearer_and_allows_long_reads():
+    from agent_reach.channels.web import _exa_call
+    body = json.dumps({"result": {"content": [{"type": "text", "text": "Content"}]}}).encode()
+    with patch("agent_reach.channels.web._exa_api_key", return_value="k-123"), \
+         patch("agent_reach.channels.web.http_request", return_value=body) as request:
+        _exa_call("web_fetch_exa", {"urls": ["https://example.com"]}, 5)
+        WebChannel()._exa_read(target="https://example.com", timeout=5)
+    assert request.call_args_list[0].kwargs["headers"]["Authorization"] == "Bearer k-123"
+    sent = json.loads(request.call_args_list[1].kwargs["data"])
+    assert sent["params"]["arguments"]["maxCharacters"] > 20000
+
+
+def test_exa_key_comes_from_env(monkeypatch, tmp_path):
+    from agent_reach.channels.web import _exa_api_key
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("EXA_API_KEY", "env-key")
+    assert _exa_api_key() == "env-key"
+
+
 def test_exa_does_not_retry_http_limits_or_access_denials():
     import urllib.error
 

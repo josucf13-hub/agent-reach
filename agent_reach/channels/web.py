@@ -27,6 +27,8 @@ _UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
 _MAX_RESPONSE_BYTES = 5 * 1024 * 1024
 _ANTIBOT_SCAN_BYTES = 4096
 _EXA_MCP = "https://mcp.exa.ai/mcp"
+_EXA_FREE_READ_CHARS = 20000
+_EXA_KEYED_READ_CHARS = 400000
 _EXA_HEADER_RE = re.compile(r"^(Title|URL|Published|Author):\s*(.*)$")
 _EXA_LIMIT_RE = re.compile(
     r"\b429\b|rate[ _-]?limit|too many requests|\bquota\b|"
@@ -74,17 +76,37 @@ def _public_url(target: str) -> str:
         raise ReachError(BAD_INPUT, "target must be a public http(s) URL") from None
 
 
+def _exa_api_key() -> str:
+    """Optional Exa key: `configure exa-key` or the EXA_API_KEY env var."""
+    from agent_reach.config import Config
+
+    try:
+        return str(Config(read_only=True).get("exa_api_key") or "").strip()
+    except Exception:
+        return ""
+
+
+def _exa_read_chars() -> int:
+    # The keyless hosted MCP is shared and rate-limited, so keep reads small
+    # there; with a key, long pages (e.g. full YouTube transcripts) fit.
+    return _EXA_KEYED_READ_CHARS if _exa_api_key() else _EXA_FREE_READ_CHARS
+
+
 def _exa_call(tool: str, arguments: dict, timeout: float) -> str:
-    """Call one tool on Exa's free hosted MCP (no key) and return its text."""
+    """Call one tool on Exa's hosted MCP (free tier, or keyed when configured) and return its text."""
     body = json.dumps(
         {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": tool, "arguments": arguments}}
     ).encode("utf-8")
+    headers = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
+    key = _exa_api_key()
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
     started = time.monotonic()
     for attempt in range(2):
         try:
             raw = http_request(
                 _EXA_MCP, timeout=max(0.1, timeout - (time.monotonic() - started)), data=body,
-                headers={"Content-Type": "application/json", "Accept": "application/json, text/event-stream"},
+                headers=headers,
             ).decode("utf-8", errors="replace")
             break
         except http.client.IncompleteRead:
@@ -212,7 +234,7 @@ class WebChannel(Channel):
 
     def _exa_read(self, *, target: str, timeout: float) -> list:
         url = _public_url(target)
-        text = _exa_call("web_fetch_exa", {"urls": [url], "maxCharacters": 20000}, timeout)
+        text = _exa_call("web_fetch_exa", {"urls": [url], "maxCharacters": _exa_read_chars()}, timeout)
         items = _parse_exa_text(text)
         if items:
             items[0]["url"] = items[0]["url"] or url
